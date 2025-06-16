@@ -59,6 +59,12 @@ def delete_category_db(guild_id, name):
 
 def load_categories(guild_id):
     data = load_json_file(CATEGORIES_FILE, {})
+    # レガシー形式（配列）の場合は新形式に変換
+    if isinstance(data, list):
+        # 配列形式のデータを新形式に変換して保存
+        new_data = {str(guild_id): data}
+        save_json_file(CATEGORIES_FILE, new_data)
+        return data
     return data.get(str(guild_id), [])
 
 # --- Flask アプリケーション設定 ---
