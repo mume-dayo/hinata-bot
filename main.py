@@ -13,6 +13,10 @@ import os
 ACHIEVEMENT_CHANNELS_FILE = "achievement_channels.json"
 CATEGORIES_FILE = "categories.json"
 
+# --- メモリ内データストレージ ---
+memory_achievement_channels = {}
+memory_categories = {}
+
 # --- データ管理関数 ---
 def load_json_file(filename, default=None):
     try:
@@ -22,50 +26,64 @@ def load_json_file(filename, default=None):
         return default or {}
 
 def save_json_file(filename, data):
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except:
+        # ファイル書き込みエラーは無視（Render対応）
+        pass
+
+def initialize_data():
+    """起動時にファイルからメモリにデータを読み込む"""
+    global memory_achievement_channels, memory_categories
+    
+    # 実績チャンネル設定を読み込み
+    memory_achievement_channels = load_json_file(ACHIEVEMENT_CHANNELS_FILE, {})
+    
+    # カテゴリーデータを読み込み
+    categories_data = load_json_file(CATEGORIES_FILE, {})
+    
+    # レガシー形式（配列）の場合は新形式に変換
+    if isinstance(categories_data, list):
+        # デフォルトでギルドID 0に設定（後で実際のギルドIDに移行）
+        memory_categories = {"0": categories_data}
+    else:
+        memory_categories = categories_data
 
 def save_achievement_channel(guild_id, channel_id):
-    data = load_json_file(ACHIEVEMENT_CHANNELS_FILE, {})
-    data[str(guild_id)] = channel_id
-    save_json_file(ACHIEVEMENT_CHANNELS_FILE, data)
+    memory_achievement_channels[str(guild_id)] = channel_id
+    save_json_file(ACHIEVEMENT_CHANNELS_FILE, memory_achievement_channels)
 
 def get_achievement_channel(guild_id):
-    data = load_json_file(ACHIEVEMENT_CHANNELS_FILE, {})
-    return data.get(str(guild_id))
+    return memory_achievement_channels.get(str(guild_id))
 
 def save_category(guild_id, name, emoji):
-    data = load_json_file(CATEGORIES_FILE, {})
     guild_key = str(guild_id)
-    if guild_key not in data:
-        data[guild_key] = []
+    if guild_key not in memory_categories:
+        memory_categories[guild_key] = []
     
     # 既存のカテゴリーを更新または新規追加
-    for i, cat in enumerate(data[guild_key]):
+    for i, cat in enumerate(memory_categories[guild_key]):
         if cat["name"] == name:
-            data[guild_key][i] = {"name": name, "emoji": emoji}
+            memory_categories[guild_key][i] = {"name": name, "emoji": emoji}
             break
     else:
-        data[guild_key].append({"name": name, "emoji": emoji})
+        memory_categories[guild_key].append({"name": name, "emoji": emoji})
     
-    save_json_file(CATEGORIES_FILE, data)
+    save_json_file(CATEGORIES_FILE, memory_categories)
 
 def delete_category_db(guild_id, name):
-    data = load_json_file(CATEGORIES_FILE, {})
     guild_key = str(guild_id)
-    if guild_key in data:
-        data[guild_key] = [cat for cat in data[guild_key] if cat["name"] != name]
-        save_json_file(CATEGORIES_FILE, data)
+    if guild_key in memory_categories:
+        memory_categories[guild_key] = [cat for cat in memory_categories[guild_key] if cat["name"] != name]
+        save_json_file(CATEGORIES_FILE, memory_categories)
 
 def load_categories(guild_id):
-    data = load_json_file(CATEGORIES_FILE, {})
-    # レガシー形式（配列）の場合は新形式に変換
-    if isinstance(data, list):
-        # 配列形式のデータを新形式に変換して保存
-        new_data = {str(guild_id): data}
-        save_json_file(CATEGORIES_FILE, new_data)
-        return data
-    return data.get(str(guild_id), [])
+    guild_key = str(guild_id)
+    # 指定されたギルドのカテゴリーがない場合、デフォルト（ギルドID 0）のデータを使用
+    if guild_key not in memory_categories and "0" in memory_categories:
+        memory_categories[guild_key] = memory_categories["0"].copy()
+    return memory_categories.get(guild_key, [])
 
 # --- Flask アプリケーション設定 ---
 app = Flask(__name__)
@@ -283,6 +301,11 @@ async def achievement_panel(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     print(f"✅ ログイン完了：{bot.user}（ID: {bot.user.id}）")
+    
+    # データ初期化
+    initialize_data()
+    print("✅ データを初期化しました。")
+    
     try:
         synced = await bot.tree.sync()
         print(f"✅ {len(synced)} コマンドを同期しました。")
