@@ -9,42 +9,56 @@ import random
 import os
 
 # --- データベース設定 ---
-conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-c = conn.cursor()
+def init_database():
+    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
+    c = conn.cursor()
+    
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS achievement_channels (
+        guild_id INTEGER PRIMARY KEY,
+        channel_id INTEGER
+    )
+    """)
+    
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        guild_id INTEGER,
+        name TEXT,
+        emoji TEXT,
+        PRIMARY KEY (guild_id, name)
+    )
+    """)
+    conn.commit()
+    return conn, c
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS achievement_channels (
-    guild_id INTEGER PRIMARY KEY,
-    channel_id INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS categories (
-    guild_id INTEGER,
-    name TEXT,
-    emoji TEXT,
-    PRIMARY KEY (guild_id, name)
-)
-""")
-conn.commit()
+# データベース初期化
+conn, c = init_database()
 
 # --- ユーティリティ関数 ---
 def save_category(guild_id, name, emoji):
-    c.execute("""
-        INSERT INTO categories (guild_id, name, emoji)
-        VALUES (?, ?, ?)
-        ON CONFLICT(guild_id, name) DO UPDATE SET emoji=excluded.emoji
-    """, (guild_id, name, emoji))
-    conn.commit()
+    try:
+        c.execute("""
+            INSERT OR REPLACE INTO categories (guild_id, name, emoji)
+            VALUES (?, ?, ?)
+        """, (guild_id, name, emoji))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"データベースエラー (save_category): {e}")
 
 def delete_category_db(guild_id, name):
-    c.execute("DELETE FROM categories WHERE guild_id=? AND name=?", (guild_id, name))
-    conn.commit()
+    try:
+        c.execute("DELETE FROM categories WHERE guild_id=? AND name=?", (guild_id, name))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"データベースエラー (delete_category): {e}")
 
 def load_categories(guild_id):
-    c.execute("SELECT name, emoji FROM categories WHERE guild_id=?", (guild_id,))
-    return [{"name": name, "emoji": emoji} for name, emoji in c.fetchall()]
+    try:
+        c.execute("SELECT name, emoji FROM categories WHERE guild_id=?", (guild_id,))
+        return [{"name": name, "emoji": emoji} for name, emoji in c.fetchall()]
+    except sqlite3.Error as e:
+        print(f"データベースエラー (load_categories): {e}")
+        return []
 
 # --- Flask アプリケーション設定 ---
 app = Flask(__name__)
@@ -148,13 +162,16 @@ class RoleButtonView(ui.View):
 @bot.tree.command(name="achievement_channel", description="実績投稿チャンネルを設定")
 @app_commands.checks.has_permissions(administrator=True)
 async def achievement_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    c.execute("""
-        INSERT INTO achievement_channels (guild_id, channel_id)
-        VALUES (?, ?)
-        ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id
-    """, (interaction.guild.id, channel.id))
-    conn.commit()
-    await interaction.response.send_message(f"✅ 実績投稿チャンネルを {channel.mention} に設定しました。", ephemeral=True)
+    try:
+        c.execute("""
+            INSERT OR REPLACE INTO achievement_channels (guild_id, channel_id)
+            VALUES (?, ?)
+        """, (interaction.guild.id, channel.id))
+        conn.commit()
+        await interaction.response.send_message(f"✅ 実績投稿チャンネルを {channel.mention} に設定しました。", ephemeral=True)
+    except sqlite3.Error as e:
+        print(f"データベースエラー: {e}")
+        await interaction.response.send_message("⚠️ データベースエラーが発生しました。", ephemeral=True)
 
 @bot.tree.command(name="write_achievement", description="実績を投稿します")
 @app_commands.describe(
@@ -167,23 +184,27 @@ async def write_achievement(interaction: discord.Interaction, user_id: str, achi
     if not user_id.isdigit():
         return await interaction.response.send_message("⚠️ ユーザーIDは数字で入力してください。", ephemeral=True)
 
-    c.execute("SELECT channel_id FROM achievement_channels WHERE guild_id=?", (interaction.guild.id,))
-    row = c.fetchone()
-    if not row:
-        return await interaction.response.send_message("⚠️ 実績投稿チャンネルが未設定です。", ephemeral=True)
+    try:
+        c.execute("SELECT channel_id FROM achievement_channels WHERE guild_id=?", (interaction.guild.id,))
+        row = c.fetchone()
+        if not row:
+            return await interaction.response.send_message("⚠️ 実績投稿チャンネルが未設定です。", ephemeral=True)
 
-    tgt = interaction.guild.get_channel(row[0])
-    if not tgt:
-        return await interaction.response.send_message("⚠️ チャンネルが見つかりません。", ephemeral=True)
+        tgt = interaction.guild.get_channel(row[0])
+        if not tgt:
+            return await interaction.response.send_message("⚠️ チャンネルが見つかりません。", ephemeral=True)
 
-    embed = discord.Embed(title="🎉 新しい実績", color=discord.Color.gold())
-    embed.add_field(name="記入者ID", value=user_id, inline=False)
-    embed.add_field(name="内容", value=achievement, inline=False)
-    embed.add_field(name="コメント", value=comment, inline=False)
-    embed.add_field(name="評価", value=f"{rating}/5", inline=False)
+        embed = discord.Embed(title="🎉 新しい実績", color=discord.Color.gold())
+        embed.add_field(name="記入者ID", value=user_id, inline=False)
+        embed.add_field(name="内容", value=achievement, inline=False)
+        embed.add_field(name="コメント", value=comment, inline=False)
+        embed.add_field(name="評価", value=f"{rating}/5", inline=False)
 
-    await tgt.send(embed=embed)
-    await interaction.response.send_message("✅ 実績を投稿しました！", ephemeral=True)
+        await tgt.send(embed=embed)
+        await interaction.response.send_message("✅ 実績を投稿しました！", ephemeral=True)
+    except sqlite3.Error as e:
+        print(f"データベースエラー: {e}")
+        await interaction.response.send_message("⚠️ データベースエラーが発生しました。", ephemeral=True)
 
 @bot.tree.command(name="create_category", description="チケットカテゴリーを作成します")
 async def create_category(interaction: discord.Interaction, name: str, emoji: str):
