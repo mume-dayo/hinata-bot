@@ -1,64 +1,65 @@
+
 # --- ライブラリ ---
 import discord
 from discord.ext import commands
 from discord import app_commands, ui
 from flask import Flask
-import sqlite3
+import json
 import threading
 import random
 import os
 
-# --- データベース設定 ---
-def init_database():
-    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-    c = conn.cursor()
-    
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS achievement_channels (
-        guild_id INTEGER PRIMARY KEY,
-        channel_id INTEGER
-    )
-    """)
-    
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS categories (
-        guild_id INTEGER,
-        name TEXT,
-        emoji TEXT,
-        PRIMARY KEY (guild_id, name)
-    )
-    """)
-    conn.commit()
-    return conn, c
+# --- データファイルパス ---
+ACHIEVEMENT_CHANNELS_FILE = "achievement_channels.json"
+CATEGORIES_FILE = "categories.json"
 
-# データベース初期化
-conn, c = init_database()
-
-# --- ユーティリティ関数 ---
-def save_category(guild_id, name, emoji):
+# --- データ管理関数 ---
+def load_json_file(filename, default=None):
     try:
-        c.execute("""
-            INSERT OR REPLACE INTO categories (guild_id, name, emoji)
-            VALUES (?, ?, ?)
-        """, (guild_id, name, emoji))
-        conn.commit()
-    except sqlite3.Error as e:
-        print(f"データベースエラー (save_category): {e}")
+        with open(filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default or {}
+
+def save_json_file(filename, data):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def save_achievement_channel(guild_id, channel_id):
+    data = load_json_file(ACHIEVEMENT_CHANNELS_FILE, {})
+    data[str(guild_id)] = channel_id
+    save_json_file(ACHIEVEMENT_CHANNELS_FILE, data)
+
+def get_achievement_channel(guild_id):
+    data = load_json_file(ACHIEVEMENT_CHANNELS_FILE, {})
+    return data.get(str(guild_id))
+
+def save_category(guild_id, name, emoji):
+    data = load_json_file(CATEGORIES_FILE, {})
+    guild_key = str(guild_id)
+    if guild_key not in data:
+        data[guild_key] = []
+    
+    # 既存のカテゴリーを更新または新規追加
+    for i, cat in enumerate(data[guild_key]):
+        if cat["name"] == name:
+            data[guild_key][i] = {"name": name, "emoji": emoji}
+            break
+    else:
+        data[guild_key].append({"name": name, "emoji": emoji})
+    
+    save_json_file(CATEGORIES_FILE, data)
 
 def delete_category_db(guild_id, name):
-    try:
-        c.execute("DELETE FROM categories WHERE guild_id=? AND name=?", (guild_id, name))
-        conn.commit()
-    except sqlite3.Error as e:
-        print(f"データベースエラー (delete_category): {e}")
+    data = load_json_file(CATEGORIES_FILE, {})
+    guild_key = str(guild_id)
+    if guild_key in data:
+        data[guild_key] = [cat for cat in data[guild_key] if cat["name"] != name]
+        save_json_file(CATEGORIES_FILE, data)
 
 def load_categories(guild_id):
-    try:
-        c.execute("SELECT name, emoji FROM categories WHERE guild_id=?", (guild_id,))
-        return [{"name": name, "emoji": emoji} for name, emoji in c.fetchall()]
-    except sqlite3.Error as e:
-        print(f"データベースエラー (load_categories): {e}")
-        return []
+    data = load_json_file(CATEGORIES_FILE, {})
+    return data.get(str(guild_id), [])
 
 # --- Flask アプリケーション設定 ---
 app = Flask(__name__)
@@ -163,15 +164,11 @@ class RoleButtonView(ui.View):
 @app_commands.checks.has_permissions(administrator=True)
 async def achievement_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     try:
-        c.execute("""
-            INSERT OR REPLACE INTO achievement_channels (guild_id, channel_id)
-            VALUES (?, ?)
-        """, (interaction.guild.id, channel.id))
-        conn.commit()
+        save_achievement_channel(interaction.guild.id, channel.id)
         await interaction.response.send_message(f"✅ 実績投稿チャンネルを {channel.mention} に設定しました。", ephemeral=True)
-    except sqlite3.Error as e:
-        print(f"データベースエラー: {e}")
-        await interaction.response.send_message("⚠️ データベースエラーが発生しました。", ephemeral=True)
+    except Exception as e:
+        print(f"エラー: {e}")
+        await interaction.response.send_message("⚠️ エラーが発生しました。", ephemeral=True)
 
 @bot.tree.command(name="write_achievement", description="実績を投稿します")
 @app_commands.describe(
@@ -185,12 +182,11 @@ async def write_achievement(interaction: discord.Interaction, user_id: str, achi
         return await interaction.response.send_message("⚠️ ユーザーIDは数字で入力してください。", ephemeral=True)
 
     try:
-        c.execute("SELECT channel_id FROM achievement_channels WHERE guild_id=?", (interaction.guild.id,))
-        row = c.fetchone()
-        if not row:
+        channel_id = get_achievement_channel(interaction.guild.id)
+        if not channel_id:
             return await interaction.response.send_message("⚠️ 実績投稿チャンネルが未設定です。", ephemeral=True)
 
-        tgt = interaction.guild.get_channel(row[0])
+        tgt = interaction.guild.get_channel(channel_id)
         if not tgt:
             return await interaction.response.send_message("⚠️ チャンネルが見つかりません。", ephemeral=True)
 
@@ -202,9 +198,9 @@ async def write_achievement(interaction: discord.Interaction, user_id: str, achi
 
         await tgt.send(embed=embed)
         await interaction.response.send_message("✅ 実績を投稿しました！", ephemeral=True)
-    except sqlite3.Error as e:
-        print(f"データベースエラー: {e}")
-        await interaction.response.send_message("⚠️ データベースエラーが発生しました。", ephemeral=True)
+    except Exception as e:
+        print(f"エラー: {e}")
+        await interaction.response.send_message("⚠️ エラーが発生しました。", ephemeral=True)
 
 @bot.tree.command(name="create_category", description="チケットカテゴリーを作成します")
 async def create_category(interaction: discord.Interaction, name: str, emoji: str):
@@ -300,4 +296,8 @@ if __name__ == "__main__":
     
     # Discordボットを起動（環境変数からトークンを取得）
     bot_token = os.environ.get('DISCORD_TOKEN')
+    if not bot_token:
+        print("⚠️ エラー: DISCORD_TOKEN環境変数が設定されていません")
+        exit(1)
+    
     bot.run(bot_token)
